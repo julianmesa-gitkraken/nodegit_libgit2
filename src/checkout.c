@@ -53,6 +53,11 @@ typedef struct {
 	git_buf tmp;
 } checkout_buffers;
 
+enum {
+	COMPLETED_STEPS_MUTEX_INITIALIZED = 1,
+	PERFDATA_MUTEX_INITIALIZED = 2
+};
+
 typedef struct {
 	git_repository *repo;
 	git_iterator *target;
@@ -77,6 +82,9 @@ typedef struct {
 	git_checkout_perfdata perfdata;
 	git_strmap *mkdir_map;
 	git_attr_session attr_session;
+	git_mutex completed_steps_mutex;
+	git_mutex perfdata_mutex;
+	unsigned int mutexes_initialized;
 } checkout_data;
 
 typedef struct {
@@ -1430,9 +1438,11 @@ static int checkout_mkdir(
 	error = git_futils_mkdir_relative(
 		path, base, mode, flags, &mkdir_opts);
 
+	git_mutex_lock(&data->perfdata_mutex);
 	data->perfdata.mkdir_calls += mkdir_opts.perfdata.mkdir_calls;
 	data->perfdata.stat_calls += mkdir_opts.perfdata.stat_calls;
 	data->perfdata.chmod_calls += mkdir_opts.perfdata.chmod_calls;
+	git_mutex_unlock(&data->perfdata_mutex);
 
 	return error;
 }
@@ -1452,7 +1462,9 @@ static int mkpath2file(
 		return error;
 
 	if (remove_existing) {
+		git_mutex_lock(&data->perfdata_mutex);
 		data->perfdata.stat_calls++;
+		git_mutex_unlock(&data->perfdata_mutex);
 
 		if (p_lstat(path, &st) == 0) {
 
@@ -1572,7 +1584,9 @@ static int blob_content_to_file(
 		return error;
 
 	if (st) {
+		git_mutex_lock(&data->perfdata_mutex);
 		data->perfdata.stat_calls++;
+		git_mutex_unlock(&data->perfdata_mutex);
 
 		if ((error = p_stat(path, st)) < 0) {
 			git_error_set(GIT_ERROR_OS, "failed to stat '%s'", path);
@@ -1608,7 +1622,9 @@ static int blob_content_to_link(
 	}
 
 	if (!error) {
+		git_mutex_lock(&data->perfdata_mutex);
 		data->perfdata.stat_calls++;
+		git_mutex_unlock(&data->perfdata_mutex);
 
 		if ((error = p_lstat(path, st)) < 0)
 			git_error_set(GIT_ERROR_CHECKOUT, "could not stat symlink %s", path);
@@ -1653,7 +1669,9 @@ static int checkout_submodule_update_index(
 	if (checkout_target_fullpath(&fullpath, data, file->path) < 0)
 		return -1;
 
+	git_mutex_lock(&data->perfdata_mutex);
 	data->perfdata.stat_calls++;
+	git_mutex_unlock(&data->perfdata_mutex);
 	if (p_stat(fullpath->ptr, &st) < 0) {
 		git_error_set(
 			GIT_ERROR_CHECKOUT, "could not stat submodule %s\n", file->path);
@@ -1721,7 +1739,9 @@ static int checkout_safe_for_update_only(
 {
 	struct stat st;
 
+	git_mutex_lock(&data->perfdata_mutex);
 	data->perfdata.stat_calls++;
+	git_mutex_unlock(&data->perfdata_mutex);
 
 	if (p_lstat(path, &st) < 0) {
 		/* if doesn't exist, then no error and no update */
@@ -1834,7 +1854,9 @@ static int checkout_remove_the_old(
 			if (error < 0)
 				return error;
 
+			git_mutex_lock(&data->completed_steps_mutex);
 			data->completed_steps++;
+			git_mutex_unlock(&data->completed_steps_mutex);
 			report_progress(data, delta->old_file.path);
 
 			if ((actions[i] & CHECKOUT_ACTION__UPDATE_BLOB) == 0 &&
@@ -1851,7 +1873,10 @@ static int checkout_remove_the_old(
 		if (error < 0)
 			return error;
 
+
+		git_mutex_lock(&data->completed_steps_mutex);
 		data->completed_steps++;
+		git_mutex_unlock(&data->completed_steps_mutex);
 		report_progress(data, str);
 
 		if ((data->strategy & GIT_CHECKOUT_DONT_UPDATE_INDEX) == 0 &&
@@ -1889,7 +1914,9 @@ static int checkout_create_the_new_perform(
 		if ((error = checkout_blob(data, &delta->new_file)) < 0)
 			return error;
 
+		git_mutex_lock(&data->completed_steps_mutex);
 		data->completed_steps++;
+		git_mutex_unlock(&data->completed_steps_mutex);
 		report_progress(data, delta->new_file.path);
 	}
 
@@ -1932,7 +1959,9 @@ static int checkout_create_submodules(
 			if (error < 0)
 				return error;
 
+			git_mutex_lock(&data->completed_steps_mutex);
 			data->completed_steps++;
+			git_mutex_unlock(&data->completed_steps_mutex);
 			report_progress(data, delta->new_file.path);
 		}
 	}
@@ -2280,7 +2309,9 @@ static int checkout_create_conflicts(checkout_data *data)
 		if (error)
 			break;
 
+		git_mutex_lock(&data->completed_steps_mutex);
 		data->completed_steps++;
+		git_mutex_unlock(&data->completed_steps_mutex);
 		report_progress(data,
 			conflict->ours ? conflict->ours->path :
 			(conflict->theirs ? conflict->theirs->path : conflict->ancestor->path));
@@ -2298,7 +2329,9 @@ static int checkout_remove_conflicts(checkout_data *data)
 		if (git_index_conflict_remove(data->index, conflict) < 0)
 			return -1;
 
+		git_mutex_lock(&data->completed_steps_mutex);
 		data->completed_steps++;
+		git_mutex_unlock(&data->completed_steps_mutex);
 	}
 
 	return 0;
@@ -2375,6 +2408,12 @@ static void checkout_data_clear(checkout_data *data)
 	data->mkdir_map = NULL;
 
 	git_attr_session__free(&data->attr_session);
+
+	if (data->mutexes_initialized & COMPLETED_STEPS_MUTEX_INITIALIZED)
+		git_mutex_free(&data->completed_steps_mutex);
+
+	if (data->mutexes_initialized & PERFDATA_MUTEX_INITIALIZED)
+		git_mutex_free(&data->perfdata_mutex);
 }
 
 static int validate_target_directory(checkout_data *data)
@@ -2415,6 +2454,16 @@ static int checkout_data_init(
 
 	data->repo = repo;
 	data->target = target;
+
+	if ((error = git_mutex_init(&data->completed_steps_mutex)) < 0)
+		goto cleanup;
+
+	data->mutexes_initialized |= COMPLETED_STEPS_MUTEX_INITIALIZED;
+
+	if ((error = git_mutex_init(&data->perfdata_mutex)) < 0)
+		goto cleanup;
+
+	data->mutexes_initialized |= PERFDATA_MUTEX_INITIALIZED;
 
 	GIT_ERROR_CHECK_VERSION(
 		proposed, GIT_CHECKOUT_OPTIONS_VERSION, "git_checkout_options");
