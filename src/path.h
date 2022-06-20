@@ -482,6 +482,7 @@ struct git_path_diriter
 	size_t parent_len;
 
 	unsigned int flags;
+	unsigned char d_type;
 
 	DIR *dir;
 

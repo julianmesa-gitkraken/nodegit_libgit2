@@ -1430,6 +1430,8 @@ int git_path_diriter_next(git_path_diriter *diriter)
 	if (git_buf_oom(&diriter->path))
 		return -1;
 
+	diriter->d_type = de->d_type;
+
 	return error;
 }
 
