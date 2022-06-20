@@ -1469,7 +1469,11 @@ int git_path_diriter_stat(struct stat *out, git_path_diriter *diriter)
 	GIT_ASSERT_ARG(out);
 	GIT_ASSERT_ARG(diriter);
 
-	return git_path_lstat(diriter->path.ptr, out);
+	const char *fname;
+	fname = diriter->path.ptr + diriter->parent_len;
+	if (*fname == '/') ++fname;
+
+	return fstatat(dirfd(diriter->dir), fname, out, AT_SYMLINK_NOFOLLOW);
 }
 
 void git_path_diriter_free(git_path_diriter *diriter)
