@@ -1012,6 +1012,7 @@ typedef struct {
 	size_t path_len;
 	iterator_pathlist_search_t match;
 	git_oid id;
+	char *basename;
 	char path[GIT_FLEX_ARRAY];
 } filesystem_iterator_entry;
 
@@ -1073,7 +1074,7 @@ static int filesystem_iterator_entry_cmp(const void *_a, const void *_b)
 	const filesystem_iterator_entry *a = (const filesystem_iterator_entry *)_a;
 	const filesystem_iterator_entry *b = (const filesystem_iterator_entry *)_b;
 
-	return git__strcmp(a->path, b->path);
+	return git__strcmp(a->basename, b->basename);
 }
 
 static int filesystem_iterator_entry_cmp_icase(const void *_a, const void *_b)
@@ -1081,7 +1082,7 @@ static int filesystem_iterator_entry_cmp_icase(const void *_a, const void *_b)
 	const filesystem_iterator_entry *a = (const filesystem_iterator_entry *)_a;
 	const filesystem_iterator_entry *b = (const filesystem_iterator_entry *)_b;
 
-	return git__strcasecmp(a->path, b->path);
+	return git__strcasecmp(a->basename, b->basename);
 }
 
 #define FILESYSTEM_MAX_DEPTH 100
@@ -1292,6 +1293,7 @@ static int filesystem_iterator_entry_init(
 	filesystem_iterator_frame *frame,
 	const char *path,
 	size_t path_len,
+	size_t basename_len,
 	struct stat *statbuf,
 	iterator_pathlist_search_t pathlist_match)
 {
@@ -1315,6 +1317,7 @@ static int filesystem_iterator_entry_init(
 	entry->match = pathlist_match;
 	memcpy(entry->path, path, path_len);
 	memcpy(&entry->st, statbuf, sizeof(struct stat));
+	entry->basename = entry->path + (path_len - basename_len);
 
 	/* Suffix directory paths with a '/' */
 	if (S_ISDIR(entry->st.st_mode))
@@ -1342,6 +1345,7 @@ static int filesystem_iterator_frame_push(
 	filesystem_iterator_entry *entry;
 	struct stat statbuf;
 	size_t path_len;
+	size_t basename_len;
 	int error;
 	bool submodule = false;
 
@@ -1463,8 +1467,10 @@ static int filesystem_iterator_frame_push(
 			}
 		}
 
+		basename_len = diriter.path.size - diriter.parent_len - 1;
+
 		if ((error = filesystem_iterator_entry_init(&entry,
-			iter, new_frame, path, path_len, &statbuf, pathlist_match)) < 0)
+			iter, new_frame, path, path_len, basename_len, &statbuf, pathlist_match)) < 0)
 			goto done;
 
 		git_vector_insert(&new_frame->entries, entry);
@@ -2036,6 +2042,8 @@ typedef struct {
 	git_buf tree_buf;
 	bool skip_tree;
 
+	size_t end_idx;
+
 	const git_index_entry *entry;
 } index_iterator;
 
@@ -2115,6 +2123,31 @@ static int index_iterator_advance(
 
 	iter->base.flags |= GIT_ITERATOR_FIRST_ACCESS;
 
+	if (iter->end_idx == (size_t)-1) {
+		git_index_entry key;
+
+		if (iter->base.start_len && !iterator__include_trees(&iter->base)) {
+			git_buf buf = GIT_BUF_INIT;
+			memset(&key, 0, sizeof(key));
+			if (iter->base.start[iter->base.start_len - 1] == '/') {
+				git_buf_puts(&buf, iter->base.start);
+				buf.ptr[buf.size - 1] = 0;
+				key.path = buf.ptr;
+			} else {
+				key.path = iter->base.start;
+			}
+			git_vector_bsearch(&iter->next_idx, &iter->entries, &key);
+			git_buf_dispose(&buf);
+		}
+
+		if (iter->base.end_len) {
+			key.path = iter->base.end;
+			if (!git_vector_bsearch(&iter->end_idx, &iter->entries, &key)) ++iter->end_idx;
+		} else {
+			iter->end_idx = iter->entries.length;
+		}
+	}
+
 	while (true) {
 		if (iter->next_idx >= iter->entries.length) {
 			error = GIT_ITEROVER;
@@ -2135,7 +2168,7 @@ static int index_iterator_advance(
 			continue;
 		}
 
-		if (iterator_has_ended(&iter->base, entry->path)) {
+		if (iter->next_idx >= iter->end_idx && iterator_has_ended(&iter->base, entry->path)) {
 			error = GIT_ITEROVER;
 			break;
 		}
@@ -2223,6 +2256,7 @@ static int index_iterator_init(index_iterator *iter)
 	iter->base.flags &= ~GIT_ITERATOR_FIRST_ACCESS;
 	iter->next_idx = 0;
 	iter->skip_tree = false;
+	iter->end_idx = -1;
 	return 0;
 }
 
