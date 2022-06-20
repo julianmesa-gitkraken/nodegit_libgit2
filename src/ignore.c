@@ -370,12 +370,39 @@ cleanup:
 	return error;
 }
 
+char * concat_path_ign_file(git_buf *path)
+{
+	char *path_file = NULL;
+
+	path_file = git__malloc(path->size + 11);
+	if (path_file == NULL)
+		return NULL;
+
+	memcpy(path_file, path->ptr, path->size);
+	memcpy(path_file + path->size, GIT_IGNORE_FILE, 11);
+
+	return path_file;
+}
+
 int git_ignore__push_dir(git_ignores *ign, const char *dir)
 {
+	char *file_ign = NULL;
+	struct stat st;
+
 	if (git_buf_joinpath(&ign->dir, ign->dir.ptr, dir) < 0)
 		return -1;
 
 	ign->depth++;
+
+	// Do not add the .gitignore file if it not existing
+	file_ign = concat_path_ign_file(&ign->dir);
+	if (file_ign == NULL)
+		return -1;
+	if (p_stat(file_ign, &st) < 0) {
+		free(file_ign);
+		return 0;
+	}
+	free(file_ign);
 
 	return push_ignore_file(
 		ign, &ign->ign_path, ign->dir.ptr, GIT_IGNORE_FILE);
