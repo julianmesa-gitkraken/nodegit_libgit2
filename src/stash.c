@@ -389,6 +389,67 @@ cleanup:
 	return error;
 }
 
+static int build_stash_commit_from_tree(
+	git_oid *w_commit_oid,
+	git_repository *repo,
+	const git_signature *stasher,
+	const char *message,
+	git_commit *i_commit,
+	git_commit *b_commit,
+	git_commit *u_commit,
+	git_tree *tree)
+{
+	const git_commit *parents[] = {	NULL, NULL, NULL };
+
+	parents[0] = b_commit;
+	parents[1] = i_commit;
+	parents[2] = u_commit;
+
+	return git_commit_create(
+		w_commit_oid,
+		repo,
+		NULL,
+		stasher,
+		stasher,
+		NULL,
+		message,
+		tree,
+		u_commit ? 3 : 2,
+		parents);
+}
+
+static int build_stash_commit_from_index(
+	git_oid *w_commit_oid,
+	git_repository *repo,
+	const git_signature *stasher,
+	const char *message,
+	git_commit *i_commit,
+	git_commit *b_commit,
+	git_commit *u_commit,
+	git_index *index)
+{
+	git_tree *tree;
+	int error;
+	
+	if ((error = build_tree_from_index(&tree, repo, index)) < 0)
+		goto cleanup;
+
+	error = build_stash_commit_from_tree(
+		w_commit_oid,
+		repo,
+		stasher,
+		message,
+		i_commit,
+		b_commit,
+		u_commit,
+		tree
+	);
+
+cleanup:
+	git_tree_free(tree);
+	return error;
+}
+
 static int commit_worktree(
 	git_oid *w_commit_oid,
 	git_repository *repo,
@@ -398,14 +459,9 @@ static int commit_worktree(
 	git_commit *b_commit,
 	git_commit *u_commit)
 {
-	const git_commit *parents[] = {	NULL, NULL, NULL };
 	git_index *i_index = NULL, *r_index = NULL;
 	git_tree *w_tree = NULL;
 	int error = 0, ignorecase;
-
-	parents[0] = b_commit;
-	parents[1] = i_commit;
-	parents[2] = u_commit;
 
 	if ((error = git_repository_index(&r_index, repo) < 0) ||
 	    (error = git_index_new(&i_index)) < 0 ||
@@ -418,17 +474,16 @@ static int commit_worktree(
 	if ((error = build_workdir_tree(&w_tree, repo, i_index, b_commit)) < 0)
 		goto cleanup;
 
-	error = git_commit_create(
+	error = build_stash_commit_from_tree(
 		w_commit_oid,
 		repo,
-		NULL,
 		stasher,
-		stasher,
-		NULL,
 		message,
-		w_tree,
-		u_commit ? 3 : 2,
-		parents);
+		i_commit,
+		b_commit,
+		u_commit,
+		w_tree
+	);
 
 cleanup:
 	git_tree_free(w_tree);
